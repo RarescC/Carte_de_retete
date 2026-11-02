@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.idea/workspace.xml
+.idea/shelf/
+.idea/dataSources*
+.idea/inspectionProfiles/
+*.log
+*.db
