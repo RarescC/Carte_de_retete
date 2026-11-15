@@ -1044,9 +1044,6 @@ class DashboardFrame(ctk.CTkFrame):
         )
         self.btn_edit_profile.pack(fill="x", padx=16, pady=4)
 
-        self.spacer = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        self.spacer.pack(fill="both", expand=True)
-
         self.logout_btn = ctk.CTkButton(
             self.sidebar,
             text="Deconectare",
@@ -1056,7 +1053,7 @@ class DashboardFrame(ctk.CTkFrame):
             font=ctk.CTkFont(size=13, weight="bold"),
             command=self.master.show_auth
         )
-        self.logout_btn.pack(fill="x", padx=16, pady=20)
+        self.logout_btn.pack(side="bottom", fill="x", padx=16, pady=20)
 
         self.main_content = ctk.CTkFrame(self, fg_color="transparent")
         self.main_content.pack(side="right", fill="both", expand=True, padx=22, pady=18)
@@ -1610,8 +1607,8 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Organizator de retete")
-        self.geometry("800x600")
-        self.minsize(800, 600)
+        self.geometry("980x650")
+        self.minsize(920, 600)
         self.current_user = None
         self.current_frame = None
         self.show_auth()
