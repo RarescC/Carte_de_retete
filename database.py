@@ -49,20 +49,20 @@ def init_db():
             "prep_time INTEGER, "
             "calories INTEGER, "
             "appliance TEXT, "
-            "created_by_user_id INTEGER)"
+            "created_by_user_id INTEGER,"
+            "is_public INTEGER DEFAULT 1)"
         )
-        cursor.execute(
-            "CREATE TABLE IF NOT EXISTS favorites ("
-            "user_id INTEGER, "
-            "recipe_id INTEGER, "
-            "PRIMARY KEY (user_id, recipe_id))"
-        )
+        cursor.execute("PRAGMA table_info(recipes)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if "is_public" not in columns:
+            cursor.execute("ALTER TABLE recipes ADD COLUMN is_public INTEGER DEFAULT 1")
+            cursor.execute("UPDATE recipes SET is_public = 1 WHERE is_public IS NULL")
         conn.commit()
     finally:
         conn.close()
     seed_default_recipes()
 
-def import_recipes_from_json(json_path, user_id=None):
+def import_recipes_from_json(json_path, user_id=None, default_is_public=1):
     """Importă rețete dintr-un fișier JSON extern în baza de date, ignorând titlurile deja existente."""
     if not os.path.exists(json_path):
         return 0, f"Fișierul nu a fost găsit: {json_path}"
@@ -80,7 +80,7 @@ def import_recipes_from_json(json_path, user_id=None):
     inserted_count = 0
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT LOWER(title) FROM recipes")
+        cursor.execute("SELECT LOWER(title) FROM recipes WHERE is_public = 1 OR created_by_user_id = ?", (user_id,))
         existing_titles = {row[0] for row in cursor.fetchall()}
 
         to_insert = []
@@ -98,20 +98,141 @@ def import_recipes_from_json(json_path, user_id=None):
             prep_time = int(item.get("prep_time", 0) or 0)
             calories = int(item.get("calories", 0) or 0)
             appliance = str(item.get("appliance", "Plită")).strip() or "Plită"
+            is_public_val = int(item.get("is_public", default_is_public))
 
-            to_insert.append((title, cleaned_ingr, instructions, prep_time, calories, appliance, user_id))
+            to_insert.append((title, cleaned_ingr, instructions, prep_time, calories, appliance, user_id, is_public_val))
             existing_titles.add(title.lower())
 
         if to_insert:
             cursor.executemany(
-                "INSERT INTO recipes (title, ingredients, instructions, prep_time, calories, appliance, created_by_user_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO recipes (title, ingredients, instructions, prep_time, calories, appliance, created_by_user_id, is_public) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 to_insert
             )
             conn.commit()
             inserted_count = len(to_insert)
 
         return inserted_count, "Succes"
+    finally:
+        conn.close()
+
+
+def get_recipes(user_id, ingredient_query="", filter_mode="all"):
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        # Regula de bază de vizibilitate: vezi doar rețetele publice (is_public = 1)
+        # SAU rețetele private create chiar de tine (created_by_user_id = user_id)
+        params = [user_id, user_id]
+        where_clauses = ["(r.is_public = 1 OR r.created_by_user_id = ?)"]
+
+        if filter_mode == "favorites":
+            where_clauses.append("f_check.recipe_id IS NOT NULL")
+        elif filter_mode == "my_recipes":
+            where_clauses.append("r.created_by_user_id = ?")
+            params.append(user_id)
+        elif filter_mode == "private_only":
+            where_clauses.append("r.created_by_user_id = ? AND r.is_public = 0")
+            params.append(user_id)
+        elif filter_mode == "public_only":
+            where_clauses.append("r.is_public = 1")
+
+        if ingredient_query and ingredient_query.strip():
+            clean_query = f"%{ingredient_query.strip().lower()}%"
+            where_clauses.append("LOWER(r.ingredients) LIKE ?")
+            params.append(clean_query)
+
+        where_sql = f"WHERE {' AND '.join(where_clauses)}"
+
+        sql = f"""
+            SELECT 
+                r.id, 
+                r.title, 
+                r.ingredients, 
+                r.instructions, 
+                r.prep_time, 
+                r.calories, 
+                r.appliance, 
+                r.created_by_user_id,
+                r.is_public,
+                CASE WHEN f_check.recipe_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+            FROM recipes r
+            LEFT JOIN favorites f_check ON r.id = f_check.recipe_id AND f_check.user_id = ?
+            {where_sql}
+            ORDER BY r.id DESC
+        """
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+        recipes = []
+        for row in rows:
+            recipes.append({
+                "id": row[0],
+                "title": row[1],
+                "ingredients": row[2],
+                "instructions": row[3],
+                "prep_time": row[4],
+                "calories": row[5],
+                "appliance": row[6],
+                "created_by_user_id": row[7],
+                "is_public": bool(row[8]),
+                "is_favorite": bool(row[9])
+            })
+        return recipes
+    finally:
+        conn.close()
+
+
+def add_custom_recipe(user_id, title, ingredients, instructions, prep_time, calories, appliance, is_public=0):
+    cleaned_ingredients = ", ".join([item.strip().lower() for item in ingredients.split(",") if item.strip()])
+    try:
+        prep_time_int = int(prep_time)
+    except (ValueError, TypeError):
+        prep_time_int = 0
+
+    try:
+        calories_int = int(calories)
+    except (ValueError, TypeError):
+        calories_int = 0
+
+    is_public_int = 1 if is_public else 0
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO recipes (title, ingredients, instructions, prep_time, calories, appliance, created_by_user_id, is_public) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                title.strip(),
+                cleaned_ingredients,
+                instructions.strip(),
+                prep_time_int,
+                calories_int,
+                appliance.strip() if appliance else "Plită",
+                user_id,
+                is_public_int
+            )
+        )
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def delete_private_recipe(user_id, recipe_id):
+    """Șterge o rețetă DOAR dacă este privată (is_public = 0) și aparține utilizatorului curent."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM recipes WHERE id = ? AND created_by_user_id = ? AND is_public = 0",
+            (recipe_id, user_id)
+        )
+        deleted = cursor.rowcount > 0
+        if deleted:
+            cursor.execute("DELETE FROM favorites WHERE recipe_id = ?", (recipe_id,))
+        conn.commit()
+        return deleted
     finally:
         conn.close()
 
@@ -228,8 +349,8 @@ def get_recipes(user_id, ingredient_query="", filter_mode="all"):
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        params = [user_id]
-        where_clauses = []
+        params = [user_id, user_id]
+        where_clauses = ["(r.is_public = 1 OR (r.is_public = 0 AND r.created_by_user_id = ?))"]
 
         if filter_mode == "favorites":
             where_clauses.append("f_check.recipe_id IS NOT NULL")
@@ -242,24 +363,25 @@ def get_recipes(user_id, ingredient_query="", filter_mode="all"):
             where_clauses.append("LOWER(r.ingredients) LIKE ?")
             params.append(clean_query)
 
-        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        where_sql = f"WHERE {' AND '.join(where_clauses)}"
 
         sql = f"""
-            SELECT 
-                r.id, 
-                r.title, 
-                r.ingredients, 
-                r.instructions, 
-                r.prep_time, 
-                r.calories, 
-                r.appliance, 
-                r.created_by_user_id,
-                CASE WHEN f_check.recipe_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
-            FROM recipes r
-            LEFT JOIN favorites f_check ON r.id = f_check.recipe_id AND f_check.user_id = ?
-            {where_sql}
-            ORDER BY r.id DESC
-        """
+                    SELECT 
+                        r.id, 
+                        r.title, 
+                        r.ingredients, 
+                        r.instructions, 
+                        r.prep_time, 
+                        r.calories, 
+                        r.appliance, 
+                        r.created_by_user_id,
+                        r.is_public,
+                        CASE WHEN f_check.recipe_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+                    FROM recipes r
+                    LEFT JOIN favorites f_check ON r.id = f_check.recipe_id AND f_check.user_id = ?
+                    {where_sql}
+                    ORDER BY r.id DESC
+                """
         cursor.execute(sql, params)
         rows = cursor.fetchall()
         recipes = []
@@ -273,42 +395,10 @@ def get_recipes(user_id, ingredient_query="", filter_mode="all"):
                 "calories": row[5],
                 "appliance": row[6],
                 "created_by_user_id": row[7],
-                "is_favorite": bool(row[8])
+                "is_public": bool(row[8]),
+                "is_favorite": bool(row[9])
             })
         return recipes
-    finally:
-        conn.close()
-
-def add_custom_recipe(user_id, title, ingredients, instructions, prep_time, calories, appliance):
-    cleaned_ingredients = ", ".join([item.strip().lower() for item in ingredients.split(",") if item.strip()])
-    try:
-        prep_time_int = int(prep_time)
-    except (ValueError, TypeError):
-        prep_time_int = 0
-
-    try:
-        calories_int = int(calories)
-    except (ValueError, TypeError):
-        calories_int = 0
-
-    conn = get_db_connection()
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO recipes (title, ingredients, instructions, prep_time, calories, appliance, created_by_user_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                title.strip(),
-                cleaned_ingredients,
-                instructions.strip(),
-                prep_time_int,
-                calories_int,
-                appliance.strip() if appliance else "Plită",
-                user_id
-            )
-        )
-        conn.commit()
-        return cursor.lastrowid
     finally:
         conn.close()
 

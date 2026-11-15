@@ -1,6 +1,7 @@
 import json
 import re
 import customtkinter as ctk
+from tkinter import filedialog, messagebox
 from database import (
     register_user,
     authenticate_user,
@@ -8,9 +9,10 @@ from database import (
     get_user_by_id,
     get_recipes,
     add_custom_recipe,
-    toggle_favorite
+    delete_private_recipe,
+    toggle_favorite,
+    import_recipes_from_json
 )
-
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
@@ -1290,7 +1292,18 @@ class DashboardFrame(ctk.CTkFrame):
             fg_color=("#d0e1fd", "#1f3a5f"),
             text_color=("#1a5276", "#aed6f1")
         )
-        appliance_tag.pack(side="left", padx=12)
+        appliance_tag.pack(side="left", padx=(12, 6))
+
+        is_public = recipe.get("is_public", True)
+        visibility_tag = ctk.CTkLabel(
+            top_row,
+            text="  🌐 Publică  " if is_public else "  🔒 Privată  ",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            corner_radius=6,
+            fg_color=("#d5f5e3", "#1e4620") if is_public else ("#fadbd8", "#4a235a"),
+            text_color=("#1e8449", "#a9dfbf") if is_public else ("#78281f", "#d7bde2")
+        )
+        visibility_tag.pack(side="left", padx=(0, 8))
 
         fav_active = recipe.get("is_favorite", False)
         fav_btn = ctk.CTkButton(
@@ -1356,10 +1369,36 @@ class DashboardFrame(ctk.CTkFrame):
         )
         cook_btn.pack(side="left")
 
+        if not is_public and recipe.get("created_by_user_id") == self.user["id"]:
+            del_btn = ctk.CTkButton(
+                btn_row,
+                text="🗑️ Șterge",
+                width=95,
+                height=30,
+                fg_color="#c0392b",
+                hover_color="#962d22",
+                font=ctk.CTkFont(size=12, weight="bold"),
+                command=lambda r=recipe: self.handle_delete_recipe(r)
+            )
+            del_btn.pack(side="right")
+
     def handle_toggle_fav(self, recipe):
         new_state = toggle_favorite(self.user["id"], recipe["id"])
         recipe["is_favorite"] = new_state
         self.load_recipes()
+
+    def handle_delete_recipe(self, recipe):
+        confirm = messagebox.askyesno(
+            "Confirmare ștergere",
+            f"Sigur vrei să ștergi rețeta privată „{recipe['title']}”?\nAcțiunea este ireversibilă."
+        )
+        if not confirm:
+            return
+
+        if delete_private_recipe(self.user["id"], recipe["id"]):
+            self.load_recipes()
+        else:
+            messagebox.showerror("Eroare", "Această rețetă nu poate fi ștearsă.")
 
     def open_recipe_modal(self, recipe):
         modal = ctk.CTkToplevel(self)
@@ -1506,6 +1545,16 @@ class DashboardFrame(ctk.CTkFrame):
         box_instr = ctk.CTkTextbox(content, height=120, font=ctk.CTkFont(size=13), wrap="word")
         box_instr.pack(fill="x", pady=(0, 10))
 
+        lbl_visibility = ctk.CTkLabel(content, text="Vizibilitate rețetă", font=ctk.CTkFont(size=13, weight="bold"))
+        lbl_visibility.pack(anchor="w", pady=(0, 2))
+        seg_visibility = ctk.CTkSegmentedButton(
+            content,
+            values=["🔒 Privată (doar eu)", "🌐 Publică (toți utilizatorii)"],
+            height=36,
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        seg_visibility.set("🔒 Privată (doar eu)")
+        seg_visibility.pack(fill="x", pady=(0, 10))
         status_lbl = ctk.CTkLabel(content, text="", font=ctk.CTkFont(size=12), text_color="#e74c3c")
         status_lbl.pack(pady=(0, 8))
 
@@ -1516,7 +1565,7 @@ class DashboardFrame(ctk.CTkFrame):
             time_val = entry_time.get().strip()
             cals_val = entry_cals.get().strip()
             app_val = opt_app.get()
-
+            is_pub_val = 1 if "Publică" in seg_visibility.get() else 0
             if not title_val or not ingr_val or not instr_val:
                 status_lbl.configure(text="Titlul, ingredientele și instrucțiunile sunt obligatorii.")
                 return
@@ -1540,7 +1589,8 @@ class DashboardFrame(ctk.CTkFrame):
                 instr_val,
                 time_num,
                 cals_num,
-                app_val
+                app_val,
+                is_public = is_pub_val
             )
             modal.destroy()
             self.load_recipes()
