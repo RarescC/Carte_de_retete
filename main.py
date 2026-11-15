@@ -1,4 +1,5 @@
 import json
+import re
 import customtkinter as ctk
 from database import (
     register_user,
@@ -580,6 +581,370 @@ class QuestionnaireFrame(ctk.CTkFrame):
                 self.user["preferences_json"] = json.dumps(self.profile_data)
             self.master.show_dashboard(self.user)
 
+class CookingModeModal(ctk.CTkToplevel):
+    def __init__(self, master, recipe):
+        super().__init__(master)
+        self.recipe = recipe
+        self.title(f"Mod Gătit: {recipe['title']}")
+        self.geometry("620x540")
+        self.minsize(560, 480)
+        self.transient(master.winfo_toplevel())
+        self.grab_set()
+
+        self.steps = self.parse_steps(recipe.get("instructions", ""))
+        self.current_step_idx = 0
+
+        self.remaining_seconds = 0
+        self.initial_seconds = 0
+        self.timer_running = False
+        self.timer_job = None
+
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # Header + Progres
+        self.header_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.header_frame.pack(fill="x", padx=24, pady=(20, 8))
+
+        self.recipe_title_lbl = ctk.CTkLabel(
+            self.header_frame,
+            text=recipe["title"],
+            font=ctk.CTkFont(size=18, weight="bold"),
+            anchor="w"
+        )
+        self.recipe_title_lbl.pack(anchor="w")
+
+        self.step_counter_lbl = ctk.CTkLabel(
+            self.header_frame,
+            text="",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color="#3B8ED0"
+        )
+        self.step_counter_lbl.pack(anchor="w", pady=(4, 4))
+
+        self.progress_bar = ctk.CTkProgressBar(self, height=10)
+        self.progress_bar.pack(fill="x", padx=24, pady=(0, 14))
+
+        # Cardul cu textul pasului curent
+        self.step_card = ctk.CTkFrame(self, corner_radius=14)
+        self.step_card.pack(fill="both", expand=True, padx=24, pady=(0, 14))
+
+        self.step_text_lbl = ctk.CTkLabel(
+            self.step_card,
+            text="",
+            font=ctk.CTkFont(size=16),
+            wraplength=530,
+            justify="left",
+            anchor="nw"
+        )
+        self.step_text_lbl.pack(fill="both", expand=True, padx=20, pady=20)
+
+        # Secțiunea Timer Integrat
+        self.timer_card = ctk.CTkFrame(self, corner_radius=12, fg_color=("#e8eef5", "#1e2733"))
+        self.timer_card.pack(fill="x", padx=24, pady=(0, 16))
+
+        self.timer_info_lbl = ctk.CTkLabel(
+            self.timer_card,
+            text="⏱️ Cronometru pas",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="gray70"
+        )
+        self.timer_info_lbl.pack(pady=(10, 2))
+
+        self.timer_display_entry = ctk.CTkEntry(
+            self.timer_card,
+            width=190,
+            height=48,
+            font=ctk.CTkFont(size=32, weight="bold"),
+            text_color="#2ecc71",
+            justify="center",
+            fg_color=("white", "#161d26"),
+            border_width=1
+        )
+        self.timer_display_entry.pack(pady=(2, 8))
+        self.timer_display_entry.bind("<FocusIn>", self.on_timer_focus_in)
+        self.timer_display_entry.bind("<Return>", self.apply_typed_time)
+        self.timer_display_entry.bind("<FocusOut>", self.apply_typed_time)
+
+        self.timer_controls = ctk.CTkFrame(self.timer_card, fg_color="transparent")
+        self.timer_controls.pack(pady=(0, 12))
+
+        self.btn_minus_min = ctk.CTkButton(
+            self.timer_controls,
+            text="-1 min",
+            width=70,
+            height=32,
+            fg_color=("gray75", "gray30"),
+            hover_color=("gray65", "gray40"),
+            command=lambda: self.adjust_timer(-60)
+        )
+        self.btn_minus_min.pack(side="left", padx=4)
+
+        self.btn_start_pause = ctk.CTkButton(
+            self.timer_controls,
+            text="▶ Start Timer",
+            width=125,
+            height=32,
+            fg_color="#27ae60",
+            hover_color="#219653",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self.toggle_timer
+        )
+        self.btn_start_pause.pack(side="left", padx=6)
+
+        self.btn_reset_timer = ctk.CTkButton(
+            self.timer_controls,
+            text="↺ Reset",
+            width=75,
+            height=32,
+            fg_color=("gray75", "gray30"),
+            hover_color=("gray65", "gray40"),
+            command=self.reset_timer
+        )
+        self.btn_reset_timer.pack(side="left", padx=4)
+
+        self.btn_plus_min = ctk.CTkButton(
+            self.timer_controls,
+            text="+1 min",
+            width=70,
+            height=32,
+            fg_color=("gray75", "gray30"),
+            hover_color=("gray65", "gray40"),
+            command=lambda: self.adjust_timer(60)
+        )
+        self.btn_plus_min.pack(side="left", padx=4)
+
+        # Butoane navigare pași
+        self.nav_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.nav_frame.pack(fill="x", padx=24, pady=(0, 20))
+
+        self.btn_prev = ctk.CTkButton(
+            self.nav_frame,
+            text="← Pasul anterior",
+            width=150,
+            height=40,
+            fg_color=("gray75", "gray30"),
+            hover_color=("gray65", "gray40"),
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self.prev_step
+        )
+        self.btn_prev.pack(side="left")
+
+        self.btn_next = ctk.CTkButton(
+            self.nav_frame,
+            text="Pasul următor →",
+            width=180,
+            height=40,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self.next_step
+        )
+        self.btn_next.pack(side="right")
+
+        self.render_current_step()
+
+    def parse_steps(self, instructions_text):
+        lines = [line.strip() for line in instructions_text.splitlines() if line.strip()]
+        cleaned_steps = []
+        for line in lines:
+            # Elimină numerotarea redundantă de tip "1. " de la început, o afișăm noi clar în header
+            step_clean = re.sub(r"^\d+[\.\)]\s*", "", line)
+            cleaned_steps.append(step_clean)
+        return cleaned_steps if cleaned_steps else ["Urmează instrucțiunile rețetei."]
+
+    def extract_duration_seconds(self, text):
+        """Detectează automat durate în minute sau secunde din textul pasului."""
+        # Caută pattern-uri de tip: "15 min", "20-25 de minute", "1.5 - 2 minute"
+        min_match = re.search(
+            r"(\d+(?:[\.,]\d+)?)\s*(?:-\s*\d+(?:[\.,]\d+)?)?\s*(?:de\s+)?(?:minute|minut|min)\b",
+            text,
+            re.IGNORECASE
+        )
+        if min_match:
+            minutes_val = float(min_match.group(1).replace(",", "."))
+            return int(round(minutes_val * 60))
+
+        sec_match = re.search(
+            r"(\d+)\s*(?:-\s*\d+)?\s*(?:de\s+)?(?:secunde|secunda|sec)\b",
+            text,
+            re.IGNORECASE
+        )
+        if sec_match:
+            return int(sec_match.group(1))
+
+        return 0
+
+    def format_time(self, total_seconds):
+        mins = total_seconds // 60
+        secs = total_seconds % 60
+        return f"{mins:02d}:{secs:02d}"
+
+    def set_timer_display(self, text, color=None):
+        """Actualizează textul și culoarea din câmpul cronometrului."""
+        self.timer_display_entry.configure(state="normal")
+        self.timer_display_entry.delete(0, "end")
+        self.timer_display_entry.insert(0, text)
+        if color:
+            self.timer_display_entry.configure(text_color=color)
+        if self.timer_running:
+            self.timer_display_entry.configure(state="disabled")
+
+    def on_timer_focus_in(self, event=None):
+        """Pune pauză automat dacă dai click să editezi în timp ce merge cronometrul."""
+        if self.timer_running:
+            self.stop_timer_job()
+            self.btn_start_pause.configure(text="▶ Continuă", fg_color="#27ae60", hover_color="#219653")
+            self.timer_display_entry.configure(state="normal")
+
+    def apply_typed_time(self, event=None):
+        """Acceptă formate de tip '15' (15 min) sau '12:30' (12 min 30 sec)."""
+        if self.timer_running:
+            return
+
+        raw = self.timer_display_entry.get().strip().replace("— GATA!", "").strip()
+        total_sec = None
+
+        if ":" in raw:
+            parts = raw.split(":")
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                mins = int(parts[0])
+                secs = min(59, int(parts[1]))
+                total_sec = mins * 60 + secs
+        elif raw.isdigit():
+            # Dacă scrii doar un număr (ex: "15"), îl interpretează ca 15 minute
+            total_sec = int(raw) * 60
+
+        if total_sec is not None:
+            self.remaining_seconds = max(0, total_sec)
+            self.initial_seconds = self.remaining_seconds
+            self.timer_info_lbl.configure(
+                text=f"⏱️ Timp setat manual: {self.format_time(self.remaining_seconds)}"
+                if self.remaining_seconds > 0 else "⏱️ Cronometru pas"
+            )
+
+        self.set_timer_display(
+            self.format_time(self.remaining_seconds),
+            color="#2ecc71" if self.remaining_seconds > 0 else "gray60"
+        )
+        if event and str(event.keysym) == "Return":
+            self.focus()  # Scoate cursorul din căsuță la apăsarea Enter
+
+    def stop_timer_job(self):
+        self.timer_running = False
+        if self.timer_job is not None:
+            try:
+                self.after_cancel(self.timer_job)
+            except Exception:
+                pass
+            self.timer_job = None
+
+    def render_current_step(self):
+        self.stop_timer_job()
+        total = len(self.steps)
+        current_num = self.current_step_idx + 1
+        step_text = self.steps[self.current_step_idx]
+
+        self.step_counter_lbl.configure(text=f"Pasul {current_num} din {total}")
+        self.progress_bar.set(current_num / total)
+        self.step_text_lbl.configure(text=step_text)
+
+        detected_sec = self.extract_duration_seconds(step_text)
+        self.initial_seconds = detected_sec
+        self.remaining_seconds = detected_sec
+        self.set_timer_display(
+            self.format_time(self.remaining_seconds),
+            color="#2ecc71" if detected_sec > 0 else "gray60"
+        )
+        self.btn_start_pause.configure(text="▶ Start Timer", fg_color="#27ae60", hover_color="#219653")
+
+        if detected_sec > 0:
+            self.timer_info_lbl.configure(
+                text=f"⏱️ Timp detectat automat: {self.format_time(detected_sec)} (poți edita direct cifrele)"
+            )
+        else:
+            self.timer_info_lbl.configure(
+                text="⏱️ Dă click pe cifre pentru a scrie durata (ex: 15 sau 05:30)"
+            )
+
+        self.btn_prev.configure(state="normal" if self.current_step_idx > 0 else "disabled")
+        if self.current_step_idx == total - 1:
+            self.btn_next.configure(
+                text="✔ Finalizează rețeta",
+                fg_color="#27ae60",
+                hover_color="#219653"
+            )
+        else:
+            self.btn_next.configure(
+                text="Pasul următor →",
+                fg_color=("#3B8ED0", "#1f6aa5"),
+                hover_color=("#36719F", "#144870")
+            )
+
+    def adjust_timer(self, delta_seconds):
+        if not self.timer_running:
+            self.apply_typed_time()
+        self.remaining_seconds = max(0, self.remaining_seconds + delta_seconds)
+        if not self.timer_running:
+            self.initial_seconds = self.remaining_seconds
+        self.set_timer_display(
+            self.format_time(self.remaining_seconds),
+            color="#2ecc71" if self.remaining_seconds > 0 else "gray60"
+        )
+
+    def toggle_timer(self):
+        if self.timer_running:
+            self.stop_timer_job()
+            self.timer_display_entry.configure(state="normal")
+            self.btn_start_pause.configure(text="▶ Continuă", fg_color="#27ae60", hover_color="#219653")
+        else:
+            self.apply_typed_time()  # Preia valoarea scrisă chiar dacă nu ai apăsat Enter înainte de Start
+            if self.remaining_seconds <= 0:
+                return
+            self.timer_running = True
+            self.btn_start_pause.configure(text="⏸ Pauză", fg_color="#e67e22", hover_color="#d35400")
+            self.set_timer_display(self.format_time(self.remaining_seconds), color="#3B8ED0")
+            self.tick_timer()
+
+    def tick_timer(self):
+        if not self.timer_running:
+            return
+
+        if self.remaining_seconds > 0:
+            self.remaining_seconds -= 1
+            self.set_timer_display(self.format_time(self.remaining_seconds))
+            self.timer_job = self.after(1000, self.tick_timer)
+        else:
+            self.stop_timer_job()
+            self.set_timer_display("00:00", color="#e74c3c")
+            self.timer_info_lbl.configure(text="🔔 Timpul pentru acest pas a expirat!")
+            self.btn_start_pause.configure(text="▶ Start Timer", fg_color="#27ae60", hover_color="#219653")
+            try:
+                self.bell()
+            except Exception:
+                pass
+
+    def reset_timer(self):
+        self.stop_timer_job()
+        self.remaining_seconds = self.initial_seconds
+        self.set_timer_display(
+            self.format_time(self.remaining_seconds),
+            color="#2ecc71" if self.remaining_seconds > 0 else "gray60"
+        )
+        self.btn_start_pause.configure(text="▶ Start Timer", fg_color="#27ae60", hover_color="#219653")
+
+    def prev_step(self):
+        if self.current_step_idx > 0:
+            self.current_step_idx -= 1
+            self.render_current_step()
+
+    def next_step(self):
+        if self.current_step_idx < len(self.steps) - 1:
+            self.current_step_idx += 1
+            self.render_current_step()
+        else:
+            self.on_close()
+
+    def on_close(self):
+        self.stop_timer_job()
+        self.destroy()
 class DashboardFrame(ctk.CTkFrame):
     def __init__(self, master, user):
         super().__init__(master, fg_color="transparent")
@@ -977,7 +1342,19 @@ class DashboardFrame(ctk.CTkFrame):
             font=ctk.CTkFont(size=12, weight="bold"),
             command=lambda r=recipe: self.open_recipe_modal(r)
         )
-        view_btn.pack(side="left")
+        view_btn.pack(side="left", padx=(0, 8))
+
+        cook_btn = ctk.CTkButton(
+            btn_row,
+            text="🍳 Începe Prepararea",
+            width=155,
+            height=30,
+            fg_color="#27ae60",
+            hover_color="#219653",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=lambda r=recipe: self.open_cooking_mode(r)
+        )
+        cook_btn.pack(side="left")
 
     def handle_toggle_fav(self, recipe):
         new_state = toggle_favorite(self.user["id"], recipe["id"])
@@ -1049,7 +1426,16 @@ class DashboardFrame(ctk.CTkFrame):
         instructions_box.insert("1.0", recipe.get("instructions", ""))
         instructions_box.configure(state="disabled")
         instructions_box.pack(fill="x", pady=(0, 16))
-
+        btn_start_cook = ctk.CTkButton(
+            content,
+            text="🍳 Începe Prepararea (Pas cu Pas + Timer)",
+            height=40,
+            fg_color="#27ae60",
+            hover_color="#219653",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            command=lambda: [modal.destroy(), self.open_cooking_mode(recipe)]
+        )
+        btn_start_cook.pack(fill="x", pady=(0, 8))
         btn_close = ctk.CTkButton(
             content,
             text="Închide",
@@ -1058,6 +1444,9 @@ class DashboardFrame(ctk.CTkFrame):
             command=modal.destroy
         )
         btn_close.pack(fill="x", pady=(0, 8))
+
+    def open_cooking_mode(self, recipe):
+        CookingModeModal(self, recipe)
 
     def open_add_recipe_modal(self):
         modal = ctk.CTkToplevel(self)
