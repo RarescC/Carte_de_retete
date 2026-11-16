@@ -28,6 +28,14 @@ class UserData(dict):
 def get_db_connection():
     return sqlite3.connect(DB_PATH)
 
+def format_stars(rating):
+    """Transformă o notă (1-5) în reprezentare vizuală cu stele (ex: ★★★★☆ (4.2))."""
+    if not rating or rating <= 0:
+        return "☆☆☆☆☆ (Fără recenzii)"
+    full_stars = int(round(rating))
+    empty_stars = 5 - full_stars
+    return "★" * full_stars + "☆" * empty_stars + f" ({rating})"
+
 def init_db():
     conn = get_db_connection()
     try:
@@ -57,6 +65,22 @@ def init_db():
         if "is_public" not in columns:
             cursor.execute("ALTER TABLE recipes ADD COLUMN is_public INTEGER DEFAULT 1")
             cursor.execute("UPDATE recipes SET is_public = 1 WHERE is_public IS NULL")
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS reviews ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL, "
+            "recipe_id INTEGER NOT NULL, "
+            "rating INTEGER NOT NULL CHECK(rating >= 1 AND rating <= 5), "
+            "comment TEXT, "
+            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
+            "UNIQUE(user_id, recipe_id))"
+        )
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS favorites ("
+            "user_id INTEGER, "
+            "recipe_id INTEGER, "
+            "PRIMARY KEY (user_id, recipe_id))"
+        )
         conn.commit()
     finally:
         conn.close()
@@ -366,26 +390,31 @@ def get_recipes(user_id, ingredient_query="", filter_mode="all"):
         where_sql = f"WHERE {' AND '.join(where_clauses)}"
 
         sql = f"""
-                    SELECT 
-                        r.id, 
-                        r.title, 
-                        r.ingredients, 
-                        r.instructions, 
-                        r.prep_time, 
-                        r.calories, 
-                        r.appliance, 
-                        r.created_by_user_id,
-                        r.is_public,
-                        CASE WHEN f_check.recipe_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
-                    FROM recipes r
-                    LEFT JOIN favorites f_check ON r.id = f_check.recipe_id AND f_check.user_id = ?
-                    {where_sql}
-                    ORDER BY r.id DESC
-                """
+            SELECT 
+                r.id, 
+                r.title, 
+                r.ingredients, 
+                r.instructions, 
+                r.prep_time, 
+                r.calories, 
+                r.appliance, 
+                r.created_by_user_id,
+                r.is_public,
+                CASE WHEN f_check.recipe_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite,
+                COALESCE(ROUND(AVG(rev.rating), 1), 0) AS avg_rating,
+                COUNT(DISTINCT rev.id) AS review_count
+            FROM recipes r
+            LEFT JOIN favorites f_check ON r.id = f_check.recipe_id AND f_check.user_id = ?
+            LEFT JOIN reviews rev ON r.id = rev.recipe_id
+            {where_sql}
+            GROUP BY r.id
+            ORDER BY r.id DESC
+        """
         cursor.execute(sql, params)
         rows = cursor.fetchall()
         recipes = []
         for row in rows:
+            avg_rating = row[10]
             recipes.append({
                 "id": row[0],
                 "title": row[1],
@@ -396,7 +425,10 @@ def get_recipes(user_id, ingredient_query="", filter_mode="all"):
                 "appliance": row[6],
                 "created_by_user_id": row[7],
                 "is_public": bool(row[8]),
-                "is_favorite": bool(row[9])
+                "is_favorite": bool(row[9]),
+                "avg_rating": avg_rating,
+                "review_count": row[11],
+                "stars": format_stars(avg_rating)
             })
         return recipes
     finally:
@@ -438,5 +470,86 @@ def toggle_favorite(user_id, recipe_id):
             return True
     finally:
         conn.close()
+def add_or_update_review(user_id, recipe_id, rating, comment=""):
+    """Salvează sau actualizează review-ul cu stele (1-5) al unui utilizator."""
+    try:
+        rating_int = int(rating)
+        if rating_int < 1 or rating_int > 5:
+            return False, "Alege între 1 și 5 stele."
+    except (ValueError, TypeError):
+        return False, "Număr de stele invalid."
 
+    clean_comment = comment.strip() if comment else ""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO reviews (user_id, recipe_id, rating, comment, created_at)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(user_id, recipe_id) DO UPDATE SET
+                rating = excluded.rating,
+                comment = excluded.comment,
+                created_at = CURRENT_TIMESTAMP
+            """,
+            (user_id, recipe_id, rating_int, clean_comment)
+        )
+        conn.commit()
+        return True, "Review salvat cu succes!"
+    except Exception as e:
+        return False, str(e)
+    finally:
+        conn.close()
+
+def get_recipe_reviews(recipe_id):
+    """Returnează toate review-urile unei rețete, cu stelele formatate (ex: ★★★★☆)."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT rev.id, u.email, rev.rating, rev.comment, rev.created_at, rev.user_id
+            FROM reviews rev
+            JOIN users u ON rev.user_id = u.id
+            WHERE rev.recipe_id = ?
+            ORDER BY rev.created_at DESC
+            """,
+            (recipe_id,)
+        )
+        rows = cursor.fetchall()
+        reviews = []
+        for row in rows:
+            author_name = row[1].split("@")[0]
+            rating_val = row[2]
+            reviews.append({
+                "id": row[0],
+                "author": author_name,
+                "rating": rating_val,
+                "stars": "★" * rating_val + "☆" * (5 - rating_val),
+                "comment": row[3],
+                "created_at": row[4],
+                "user_id": row[5]
+            })
+        return reviews
+    finally:
+        conn.close()
+
+def get_recipe_rating_stats(recipe_id):
+    """Returnează media stelelor și numărul total de review-uri pentru o rețetă."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT ROUND(AVG(rating), 1), COUNT(*) FROM reviews WHERE recipe_id = ?",
+            (recipe_id,)
+        )
+        avg_rating, total_reviews = cursor.fetchone()
+        avg_val = avg_rating if avg_rating is not None else 0.0
+        return {
+            "average": avg_val,
+            "stars": format_stars(avg_val),
+            "count": total_reviews
+        }
+    finally:
+        conn.close()
 init_db()

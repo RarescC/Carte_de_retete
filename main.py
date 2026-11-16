@@ -11,11 +11,49 @@ from database import (
     add_custom_recipe,
     delete_private_recipe,
     toggle_favorite,
-    import_recipes_from_json
+    import_recipes_from_json,
+    add_or_update_review,
+    get_recipe_reviews,
+    get_recipe_rating_stats
 )
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
+class StarRatingFrame(ctk.CTkFrame):
+    def __init__(self, master, initial_rating=5):
+        super().__init__(master, fg_color="transparent")
+        self.rating = initial_rating
+        self.star_buttons = []
+
+        for i in range(1, 6):
+            btn = ctk.CTkButton(
+                self,
+                text="★",
+                width=36,
+                height=36,
+                fg_color="transparent",
+                hover_color=("gray85", "gray25"),
+                font=ctk.CTkFont(size=24),
+                command=lambda val=i: self.set_rating(val)
+            )
+            btn.pack(side="left", padx=2)
+            self.star_buttons.append(btn)
+
+        self.update_stars()
+
+    def set_rating(self, val):
+        self.rating = val
+        self.update_stars()
+
+    def update_stars(self):
+        for idx, btn in enumerate(self.star_buttons, start=1):
+            if idx <= self.rating:
+                btn.configure(text="★", text_color="#f1c40f")
+            else:
+                btn.configure(text="☆", text_color="gray60")
+
+    def get_rating(self):
+        return self.rating
 class AuthFrame(ctk.CTkFrame):
     def __init__(self, master):
         super().__init__(master, fg_color="transparent")
@@ -1320,9 +1358,13 @@ class DashboardFrame(ctk.CTkFrame):
 
         prep_time = recipe.get("prep_time", 0)
         calories = recipe.get("calories", 0)
+        stars_text = recipe.get("stars", "☆☆☆☆☆ (Fără recenzii)")
+        rev_count = recipe.get("review_count", 0)
+        rev_label = f"{stars_text} • {rev_count} recenzii" if rev_count > 0 else "☆☆☆☆☆ (Fără recenzii)"
+
         meta_lbl = ctk.CTkLabel(
             meta_row,
-            text=f"⏱️ Timp: {prep_time} min   |   🔥 Calorii: {calories} kcal / porție",
+            text=f"⏱️ Timp: {prep_time} min   |   🔥 Calorii: {calories} kcal   |   {rev_label}",
             font=ctk.CTkFont(size=12),
             text_color="gray70"
         )
@@ -1400,8 +1442,8 @@ class DashboardFrame(ctk.CTkFrame):
     def open_recipe_modal(self, recipe):
         modal = ctk.CTkToplevel(self)
         modal.title(recipe["title"])
-        modal.geometry("540x520")
-        modal.minsize(480, 440)
+        modal.geometry("580x680")
+        modal.minsize(500, 540)
         modal.transient(self.winfo_toplevel())
         modal.grab_set()
 
@@ -1412,10 +1454,19 @@ class DashboardFrame(ctk.CTkFrame):
             content,
             text=recipe["title"],
             font=ctk.CTkFont(size=20, weight="bold"),
-            wraplength=460,
+            wraplength=500,
             justify="left"
         )
-        title.pack(anchor="w", pady=(4, 6))
+        title.pack(anchor="w", pady=(4, 4))
+
+        stats_lbl = ctk.CTkLabel(
+            content,
+            text="",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color="#f1c40f",
+            anchor="w"
+        )
+        stats_lbl.pack(anchor="w", pady=(0, 6))
 
         appliance = recipe.get("appliance") or "Plită"
         prep_time = recipe.get("prep_time", 0)
@@ -1458,10 +1509,11 @@ class DashboardFrame(ctk.CTkFrame):
         )
         instr_title.pack(anchor="w", pady=(0, 4))
 
-        instructions_box = ctk.CTkTextbox(content, height=160, font=ctk.CTkFont(size=13), wrap="word")
+        instructions_box = ctk.CTkTextbox(content, height=140, font=ctk.CTkFont(size=13), wrap="word")
         instructions_box.insert("1.0", recipe.get("instructions", ""))
         instructions_box.configure(state="disabled")
-        instructions_box.pack(fill="x", pady=(0, 16))
+        instructions_box.pack(fill="x", pady=(0, 14))
+
         btn_start_cook = ctk.CTkButton(
             content,
             text="🍳 Începe Prepararea (Pas cu Pas + Timer)",
@@ -1471,7 +1523,118 @@ class DashboardFrame(ctk.CTkFrame):
             font=ctk.CTkFont(size=14, weight="bold"),
             command=lambda: [modal.destroy(), self.open_cooking_mode(recipe)]
         )
-        btn_start_cook.pack(fill="x", pady=(0, 8))
+        btn_start_cook.pack(fill="x", pady=(0, 18))
+
+        # --- SECȚIUNE REVIEW-URI CU STELE ---
+        review_form_card = ctk.CTkFrame(content, corner_radius=10, fg_color=("#eaeaea", "#2b2d30"))
+        review_form_card.pack(fill="x", pady=(0, 16))
+
+        form_title = ctk.CTkLabel(
+            review_form_card,
+            text="Ai încercat rețeta? Lasă un review:",
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        form_title.pack(anchor="w", padx=14, pady=(12, 4))
+
+        star_selector = StarRatingFrame(review_form_card, initial_rating=5)
+        star_selector.pack(anchor="w", padx=10, pady=(0, 8))
+
+        comment_box = ctk.CTkTextbox(review_form_card, height=70, font=ctk.CTkFont(size=12), wrap="word")
+        comment_box.pack(fill="x", padx=14, pady=(0, 8))
+
+        review_status_lbl = ctk.CTkLabel(review_form_card, text="", font=ctk.CTkFont(size=12))
+        review_status_lbl.pack(anchor="w", padx=14)
+
+        reviews_list_title = ctk.CTkLabel(
+            content,
+            text="Recenziile participanților:",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            anchor="w"
+        )
+        reviews_list_title.pack(anchor="w", pady=(4, 8))
+
+        reviews_container = ctk.CTkFrame(content, fg_color="transparent")
+        reviews_container.pack(fill="x", pady=(0, 14))
+
+        def refresh_reviews():
+            stats = get_recipe_rating_stats(recipe["id"])
+            if stats["count"] > 0:
+                stats_lbl.configure(text=f"{stats['stars']}  ({stats['count']} recenzii)")
+            else:
+                stats_lbl.configure(text="☆☆☆☆☆  (Nicio recenzie încă)")
+
+            for w in reviews_container.winfo_children():
+                w.destroy()
+
+            reviews = get_recipe_reviews(recipe["id"])
+            if not reviews:
+                no_rev = ctk.CTkLabel(
+                    reviews_container,
+                    text="Nu există încă recenzii. Fii primul care evaluează această rețetă!",
+                    font=ctk.CTkFont(size=12),
+                    text_color="gray60"
+                )
+                no_rev.pack(anchor="w", pady=4)
+                return
+
+            for rev in reviews:
+                item_card = ctk.CTkFrame(reviews_container, corner_radius=8, fg_color=("#f2f2f2", "#26282b"))
+                item_card.pack(fill="x", pady=4)
+
+                top_rev = ctk.CTkFrame(item_card, fg_color="transparent")
+                top_rev.pack(fill="x", padx=12, pady=(8, 2))
+
+                author_lbl = ctk.CTkLabel(
+                    top_rev,
+                    text=rev["author"],
+                    font=ctk.CTkFont(size=12, weight="bold")
+                )
+                author_lbl.pack(side="left")
+
+                stars_lbl = ctk.CTkLabel(
+                    top_rev,
+                    text=rev["stars"],
+                    font=ctk.CTkFont(size=13, weight="bold"),
+                    text_color="#f1c40f"
+                )
+                stars_lbl.pack(side="right")
+
+                if rev["comment"]:
+                    comm_lbl = ctk.CTkLabel(
+                        item_card,
+                        text=rev["comment"],
+                        font=ctk.CTkFont(size=12),
+                        wraplength=460,
+                        justify="left",
+                        anchor="w"
+                    )
+                    comm_lbl.pack(anchor="w", padx=12, pady=(0, 8))
+
+        def submit_review_action():
+            rating_val = star_selector.get_rating()
+            comment_val = comment_box.get("1.0", "end").strip()
+            ok, msg = add_or_update_review(self.user["id"], recipe["id"], rating_val, comment_val)
+            if ok:
+                review_status_lbl.configure(text=msg, text_color="#2ecc71")
+                comment_box.delete("1.0", "end")
+                refresh_reviews()
+                self.load_recipes()
+            else:
+                review_status_lbl.configure(text=msg, text_color="#e74c3c")
+
+        btn_submit_review = ctk.CTkButton(
+            review_form_card,
+            text="Trimite Review",
+            height=34,
+            fg_color="#27ae60",
+            hover_color="#219653",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=submit_review_action
+        )
+        btn_submit_review.pack(anchor="e", padx=14, pady=(4, 12))
+
+        refresh_reviews()
+
         btn_close = ctk.CTkButton(
             content,
             text="Închide",
@@ -1479,7 +1642,7 @@ class DashboardFrame(ctk.CTkFrame):
             font=ctk.CTkFont(size=13, weight="bold"),
             command=modal.destroy
         )
-        btn_close.pack(fill="x", pady=(0, 8))
+        btn_close.pack(fill="x", pady=(4, 8))
 
     def open_cooking_mode(self, recipe):
         CookingModeModal(self, recipe)
